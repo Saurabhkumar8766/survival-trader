@@ -1,76 +1,76 @@
 import streamlit as st
 import yfinance as yf
-from textblob import TextBlob
+import plotly.graph_objects as go
 import requests
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="centered")
+# --- CONFIG ---
+st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
-# ENTER YOUR KEY HERE (from newsapi.org)
-NEWS_API_KEY = "bc56e98cf39441c5b1e8b18659368d41" 
-
-# --- CORE LOGIC ENGINE ---
-def get_signal(ticker):
+# --- LIVE DATA ENGINE ---
+@st.cache_data(ttl=3600) # Updates exchange rate every hour
+def get_usd_inr():
     try:
-        data = yf.Ticker(ticker).history(period="5d", interval="1h")
-        if data.empty:
-            return "UNKNOWN", "Data not found", 0.0
-        
-        current_price = data['Close'].iloc[-1]
-        low_5d = data['Low'].min()
-        high_5d = data['High'].max()
-        
-        # 1. NO-LOSS SELL LOGIC
-        # If price is at the absolute bottom of the 5-day range, it's a danger zone.
-        if current_price <= (low_5d * 1.01):
-            return "🔴 SELL", "DANGER: Support broken. Protect your capital!", current_price
-            
-        # 2. PROFITABLE BUY LOGIC (Requirement: Confirmation of Reversal)
-        # We only buy if it's bounced at least 5% off the floor but isn't at the peak yet.
-        if current_price > (low_5d * 1.05) and current_price < (high_5d * 0.98):
-            return "🟢 BUY", "Recovery confirmed. High probability of profit.", current_price
-            
-        # 3. STABLE MARKET WAIT LOGIC
-        return "🟡 WAIT", "Market is sideways or indecisive. Keep cash safe.", current_price
+        url = "https://api.exchangerate-api.com/v4/latest/USD"
+        return requests.get(url).json()["rates"]["INR"]
     except:
-        return "ERROR", "Connection issue", 0.0
+        return 83.5 # Solid fallback
 
-# --- MOBILE DASHBOARD ---
-st.title("🛡️ Survival Trader Pro")
-st.caption("Real-Time Asset Intelligence | Navi Mumbai Edition")
+rate = get_usd_inr()
 
-# ASSET SELECTOR
-asset = st.text_input("Enter Ticker (e.g. GC=F for Gold, RVNL.NS for Rail)", "GC=F")
+def get_data(ticker):
+    data = yf.Ticker(ticker).history(period="5d", interval="1h")
+    return data
 
-signal, reason, price = get_signal(asset)
+# --- HEADER ---
+st.title("🛡️ Survival Trader Pro: Navi Mumbai Edition")
+asset = st.sidebar.text_input("Enter Ticker (GC=F, RVNL.NS)", "GC=F")
+data = get_data(asset)
 
-# THE DECISION CARD (No Ifs/Ors)
-if "BUY" in signal:
-    st.success(f"### {signal}")
-elif "SELL" in signal:
-    st.error(f"### {signal}")
+# --- REAL-TIME DISPLAY ---
+if not data.empty:
+    curr_price_usd = data['Close'].iloc[-1]
+    # Auto-convert if it's a USD asset (like Gold/Silver)
+    price_inr = curr_price_usd * rate if "=" in asset else curr_price_usd
+    
+    st.metric(label=f"Current {asset} Price", value=f"₹{price_inr:,.2f}", 
+              delta=f"{rate:.2f} USD/INR Rate")
+
+    # --- INTERACTIVE CANDLESTICK CHART ---
+    fig = go.Figure(data=[go.Candlestick(
+        x=data.index, open=data['Open'], high=data['High'], 
+        low=data['Low'], close=data['Close']
+    )])
+    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=30))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- BUDGET 2026 PROFIT & TAX CALCULATOR ---
+    st.divider()
+    st.subheader("💰 Survival Profit & Tax Predictor")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        buy_price = st.number_input("Your Buy Price (₹)", value=int(price_inr))
+        qty = st.number_input("Quantity/Grams", value=1.0)
+    
+    # Logic: 12.5% LTCG tax for holdings > 24 months (Budget 2026 Rule)
+    # 3% GST on physical gold purchases
+    total_cost = (buy_price * qty) * 1.03 
+    projected_growth = st.slider("Expected Annual Growth (%)", 5, 25, 12)
+    years = st.slider("Hold Duration (Years)", 1, 10, 3)
+    
+    future_val = (buy_price * qty) * (1 + (projected_growth/100))**years
+    raw_profit = future_val - total_cost
+    
+    # Taxing: 12.5% on profits if held > 24 months
+    tax_rate = 0.125 if years >= 2 else 0.20 # Simple estimate: LTCG vs Slab
+    tax_amt = raw_profit * tax_rate if raw_profit > 0 else 0
+    final_takehome = raw_profit - tax_amt
+
+    with col2:
+        st.write(f"**Total Cost (with 3% GST):** ₹{total_cost:,.2f}")
+        st.write(f"**Projected Value:** ₹{future_val:,.2f}")
+        st.error(f"**Estimated Tax (Budget 2026):** ₹{tax_amt:,.2f}")
+        st.success(f"**Final Survival Profit:** ₹{final_takehome:,.2f}")
+
 else:
-    st.warning(f"### {signal}")
-
-currency_symbol = "₹" if ".NS" in asset or ".BO" in asset else "$"
-st.subheader(f"Current Price: {currency_symbol}{price:,.2f}")
-st.info(f"**Action Plan:** {reason}")
-
-# --- BUDGET 2026 AUTO-SCANNER ---
-st.divider()
-st.subheader("🚀 Budget 2026 'Big Money' Picks")
-# These are sectors with high government allocation (Infra, Rail, Energy)
-budget_watchlist = ["RVNL.NS", "IRCON.NS", "TATAPOWER.NS", "BEL.NS"]
-
-cols = st.columns(2)
-for i, stock in enumerate(budget_watchlist):
-    s, _, p = get_signal(stock)
-    with cols[i % 2]:
-        if "BUY" in s:
-            st.write(f"✅ **{stock}**: **BUY** (₹{p:.0f})")
-        else:
-            st.write(f"⚪ {stock}: Wait (₹{p:.0f})")
-
-# VISUAL CHART
-st.divider()
-st.line_chart(yf.Ticker(asset).history(period="1mo")['Close'])
+    st.error("Invalid Ticker. Please use GC=F for Gold or append .NS for Indian Stocks.")
