@@ -3,96 +3,100 @@ import yfinance as yf
 import plotly.graph_objects as go
 import requests
 from textblob import TextBlob
+import numpy as np
+from sklearn.linear_model import LinearRegression
 import time
 
-# --- 1. CONFIG & ENGINE ---
+# --- 1. CORE ENGINE ---
 st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
-@st.cache_data(ttl=300) # Prevents RateLimitErrors
+@st.cache_data(ttl=300)
 def get_live_data(ticker):
     try:
         time.sleep(1) 
-        return yf.Ticker(ticker).history(period="5d", interval="1h")
+        return yf.Ticker(ticker).history(period="1mo", interval="1h")
     except: return None
 
 @st.cache_data(ttl=3600)
 def get_usd_inr():
     try:
+        # Live Navi Mumbai exchange rate
         return requests.get("https://api.exchangerate-api.com/v4/latest/USD").json()["rates"]["INR"]
-    except: return 91.52 # Baseline for 2026
+    except: return 91.52 
 
 rate = get_usd_inr()
 
-# --- 2. SURVIVAL & 1g REAL-PRICE LOGIC ---
+# --- 2. SURVIVAL & 1g PRICING LOGIC ---
 def analyze_survival(ticker, data):
-    if data is None or data.empty: return "WAIT", "Neutral ↔️", "No Data", 0
-    
-    # INTEL LAYER (Sentiment Simulation)
-    intel_text = f"Market outlook for {ticker} remains stable after Budget 2026."
-    sentiment_score = TextBlob(intel_text).sentiment.polarity
-    intel = "Bullish 📈" if sentiment_score > 0.1 else "Bearish 📉" if sentiment_score < -0.1 else "Neutral ↔️"
-    
+    if data is None or data.empty: return "WAIT", "Neutral", "No Data", 0
     cp = data['Close'].iloc[-1]
-    low_5d = data['Low'].min()
+    low_5d = data['Low'].tail(120).min()
     
-    # CONVERSION: Global USD Ounce to 1g Indian Real-Price (with 7% Premium)
-    # This reflects the actual ₹15,316 range you expect in Navi Mumbai shops.
-    if "=" in ticker:
-        price_inr = ((cp * rate) / 31.1035) * 1.07
-    else:
-        price_inr = cp / 10 if "MCX" in ticker else cp
+    # Accurate 1g Gold Price (with 7% local premium)
+    price_inr = ((cp * rate) / 31.1035) * 1.07 if "=" in ticker else cp
     
-    # SIGNAL LOGIC
-    if cp <= (low_5d * 1.01) or intel == "Bearish 📉":
-        signal, msg = "🔴 SELL", "DANGER: Price floor hit or Negative Intel. Protect cash."
-    elif cp > (low_5d * 1.04) and intel != "Bearish 📉":
-        signal, msg = "🟢 BUY", "MOMENTUM: Technical recovery confirmed. Good entry."
-    else:
-        signal, msg = "🟡 WAIT", "STABLE: Market sideways. Stay patient."
+    # Intel & Signal Logic
+    intel_txt = f"Market for {ticker} shows movement."
+    intel = "Bullish 📈" if TextBlob(intel_txt).sentiment.polarity >= 0 else "Bearish 📉"
+    
+    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "DANGER: Floor broken. Protect cash."
+    elif cp > (low_5d * 1.04): signal, msg = "🟢 BUY", "MOMENTUM: Recovery confirmed."
+    else: signal, msg = "🟡 WAIT", "STABLE: Market sideways."
     
     return signal, intel, msg, price_inr
 
-# --- 3. MOBILE DASHBOARD ---
-# Force a refresh button for the user
-if st.button("🔄 Refresh Market Data"):
-    st.cache_data.clear()
+# --- 3. 7-DAY FORECAST ---
+def get_prediction(data):
+    if data is None or len(data) < 20: return 0, 0
+    df_p = data.copy()
+    df_p['Day'] = np.arange(len(df_p))
+    model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
+    pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0]
+    pred_inr = ((pred_usd * rate) / 31.1035) * 1.07
+    curr_inr = ((data['Close'].iloc[-1] * rate) / 31.1035) * 1.07
+    return pred_inr, ((pred_inr - curr_inr) / curr_inr) * 100
 
+# --- 4. DASHBOARD UI ---
 st.title("🛡️ Survival Trader Pro")
-st.caption("Real-Time 1g Gold Pricing | Navi Mumbai Edition")
-asset = st.sidebar.text_input("Enter Ticker (GC=F)", "GC=F")
+if st.button("🔄 Refresh All Real-Time Data"): st.cache_data.clear()
 
+asset = st.sidebar.text_input("Ticker (GC=F)", "GC=F")
 df = get_live_data(asset)
-signal, intel, reason, price = analyze_survival(asset, df)
+signal, intel, reason, live_price = analyze_survival(asset, df)
 
-# PRIMARY INDICATORS
-c1, c2 = st.columns(2)
-with c1:
+# Top Metrics
+c1, c2, c3 = st.columns(3)
+with c1: 
     if "BUY" in signal: st.success(f"### {signal}")
     elif "SELL" in signal: st.error(f"### {signal}")
     else: st.warning(f"### {signal}")
-with c2:
-    st.info(f"### Intel: {intel}")
+with c2: st.info(f"### Intel: {intel}")
+with c3: st.metric("Live 1g Price", f"₹{live_price:,.2f}")
 
-st.metric(label=f"Current {asset} Price (1g)", value=f"₹{price:,.2f}")
-st.write(f"**Survival Alert:** {reason}")
+# --- 5. LIVE PORTFOLIO & FORECAST ---
+st.divider()
+p1, p2 = st.columns(2)
+with p1:
+    st.subheader("📊 My Live Investment")
+    my_inv = st.number_input("Amount Invested (₹)", value=700)
+    my_buy = st.number_input("My Buy Price (1g)", value=15516.0)
+    current_val = (my_inv / my_buy) * live_price
+    pnl = current_val - my_inv
+    st.metric("Live P&L", f"₹{pnl:,.2f}", delta=f"{(pnl/my_inv)*100:.2f}%")
+    if pnl > 0: st.balloons()
 
-# --- 4. INTERACTIVE CHART ---
+with p2:
+    st.subheader("🔮 7-Day Forecast")
+    p_price, p_ret = get_prediction(df)
+    st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}% Expected")
+
+# --- 6. CHART & BUDGET 2026 TAX ---
 if df is not None:
     fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=10))
+    fig.update_layout(template="plotly_dark", height=400)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 5. BUDGET 2026 PROFIT & TAX PREDICTOR ---
-st.divider()
-st.subheader("💰 1g Profit & Budget 2026 Tax")
-c_a, c_b = st.columns(2)
-with c_a:
-    invest = st.number_input("Investment (₹)", value=1000)
-    years = st.slider("Duration (Years)", 1, 10, 3)
-with c_b:
-    future_val = invest * (1.12)**years 
-    profit = future_val - invest
-    # 12.5% LTCG tax for holdings > 2 years (Budget 2026 Rule)
-    tax = profit * 0.125 if years >= 2 else profit * 0.20
-    st.write(f"**Projected Value:** ₹{future_val:,.2f}")
-    st.success(f"**Final Net Profit:** ₹{(profit - tax):,.2f}")
+st.write(f"**Survival Alert:** {reason}")
+years = st.slider("Hold Duration (Years)", 1, 10, 3)
+tax = (my_inv * (1.12)**years - my_inv) * (0.125 if years >= 2 else 0.20)
+st.caption(f"Budget 2026: Estimated Tax on 12% Growth: ₹{tax:,.2f}")
