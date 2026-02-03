@@ -7,13 +7,13 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import time
 
-# --- 1. CORE CONFIG ---
+# --- 1. CONFIG & STABILITY ---
 st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
 @st.cache_data(ttl=600)
 def get_live_data(ticker):
     try:
-        # Using yf.download for high-speed mobile stability
+        # download is used for better reliability on Streamlit Cloud
         data = yf.download(ticker, period="1mo", interval="1h", progress=False)
         return data if not data.empty else None
     except: return None
@@ -21,90 +21,100 @@ def get_live_data(ticker):
 @st.cache_data(ttl=3600)
 def get_usd_inr():
     try:
-        # Fetches live USD/INR exchange rate (~91.50 range for Feb 2026)
+        # Live Rate for Navi Mumbai precision
         return requests.get("https://api.exchangerate-api.com/v4/latest/USD").json()["rates"]["INR"]
     except: return 91.52 
 
 rate = get_usd_inr()
 
-# --- 2. SIDEBAR (CONTROLS) ---
+# --- 2. SIDEBAR CONTROLS (Keeps Main Screen Clean) ---
 with st.sidebar:
     st.header("👤 Portfolio Settings")
-    # Investment inputs are now safely tucked away here
-    my_inv = st.number_input("Investment Amount (₹)", value=700.0)
+    my_inv = st.number_input("Investment Amount (₹)", value=1162.0)
     my_buy = st.number_input("My Buy Price (1g)", value=15516.0)
     st.divider()
     asset = st.text_input("Ticker Symbol", "GC=F")
-    if st.button("🔄 Refresh Market Data"):
+    if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
-    st.caption("Side-toggle controls keep your main dashboard clean.")
+    st.caption("Adjusting these values updates the Real-Time Scoreboard.")
 
-# --- 3. SURVIVAL ENGINE ---
+# --- 3. THE SURVIVAL ENGINE ---
 df = get_live_data(asset)
 if df is not None:
-    # Clean float conversion to prevent TypeErrors
+    # Get clean float values
     cp = float(df['Close'].iloc[-1].item())
     low_5d = float(df['Low'].tail(120).min().item())
     
-    # 1g Price: USD Price * Exchange Rate / Troy Oz Grams * 10% Premium (GST+Storage)
+    # Live 1g Gold Price (10% premium for Paytm/GST/Storage parity)
     live_price = ((cp * rate) / 31.1035) * 1.10
     
-    # Dynamic Signal Logic
-    if cp <= (low_5d * 1.01): signal, msg, col = "🔴 SELL", "DANGER: Support floor broken. Exit now!", "error"
-    elif cp > (low_5d * 1.04): signal, msg, col = "🟢 BUY", "MOMENTUM: Technical recovery is confirmed.", "success"
-    else: signal, msg, col = "🟡 WAIT", "STABLE: Market is sideways. Stay patient.", "warning"
+    # Portfolio Math
+    current_total_value = (my_inv / my_buy) * live_price
+    current_pnl = current_total_value - my_inv
+    pnl_pct = (current_pnl / my_inv) * 100
 
-    # Portfolio Real-Time Math
-    current_value = (my_inv / my_buy) * live_price
-    pnl = current_value - my_inv
-    pnl_pct = (pnl / my_inv) * 100
+    # 7-Day Forecast (Linear Regression)
+    df_p = df.copy()
+    df_p['Day'] = np.arange(len(df_p))
+    model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
+    pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0].item()
+    pred_1g_price = ((pred_usd * rate) / 31.1035) * 1.10
+    
+    # Predicted Total Portfolio Value
+    pred_portfolio_total = (my_inv / my_buy) * pred_1g_price
 
     # --- 4. MAIN DASHBOARD ---
     st.title("🛡️ Survival Trader Pro")
     
-    # Row 1: Signals
+    # ROW 1: SIGNAL & LIVE PRICE
     c1, c2 = st.columns([2, 1])
     with c1:
-        if col == "success": st.success(f"## {signal}")
-        elif col == "error": st.error(f"## {signal}")
-        else: st.warning(f"## {signal}")
-        st.write(f"**Survival Plan:** {msg}")
+        if cp > (low_5d * 1.04):
+            st.success("## 🟢 BUY SIGNAL")
+            st.write("**Plan:** Recovery confirmed. Momentum is positive.")
+        else:
+            st.warning("## 🟡 WAIT / STABLE")
+            st.write("**Plan:** Market moving sideways. Hold position.")
     with c2:
-        st.metric("Live 1g Gold Price", f"₹{live_price:,.2f}")
+        st.metric("Live 1g Price", f"₹{live_price:,.2f}")
 
-    # Row 2: Results Only
+    # ROW 2: LIVE SCOREBOARD (Current Status)
     st.divider()
-    m1, m2 = st.columns(2)
+    st.subheader("📊 My Real-Time Portfolio Status")
+    m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("My Live Profit/Loss", f"₹{pnl:,.2f}", delta=f"{pnl_pct:.2f}%")
+        st.metric("Invested Amount", f"₹{my_inv:,.2f}")
     with m2:
-        st.metric("Total Portfolio Value", f"₹{current_value:,.2f}")
-    if pnl > 0: st.balloons()
+        st.metric("Current Profit/Loss", f"₹{current_pnl:,.2f}", delta=f"{pnl_pct:.2f}%")
+    with m3:
+        st.metric("Total Portfolio Value", f"₹{current_total_value:,.2f}")
 
-    # SECTION 5: ADVANCED FEATURES (COLLAPSIBLE)
+    # ROW 3: 7-DAY FORECAST (Expected Status)
     st.divider()
-    with st.expander("🔮 7-Day Prediction & Market Intel"):
-        # Machine Learning: Linear Regression
-        df_p = df.copy()
-        df_p['Day'] = np.arange(len(df_p))
-        model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
-        pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0].item()
-        p_price = ((pred_usd * rate) / 31.1035) * 1.10
-        expected_total = (current_value / live_price) * p_price
-        
-        st.metric("Expected Total (7 Days)", f"₹{expected_total:,.2f}", delta=f"₹{(expected_total-current_value):,.2f}")
-        st.write(f"**Global Sentiment:** {'Bullish 📈' if p_price > live_price else 'Bearish 📉'}")
+    st.subheader("🔮 7-Day Growth Projection")
+    f1, f2 = st.columns(2)
+    with f1:
+        st.metric("Expected 1g Price", f"₹{pred_1g_price:,.2f}")
+    with f2:
+        st.metric("Expected Portfolio Value", f"₹{pred_portfolio_total:,.2f}", 
+                  delta=f"₹{(pred_portfolio_total - current_total_value):,.2f}")
 
-    with st.expander("📉 Full Candlestick Market Trend"):
-        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-        fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,b=0,t=0))
-        st.plotly_chart(fig, use_container_width=True)
+    # ROW 4: THE LIVE CHART
+    st.divider()
+    st.subheader("📉 Market Trend (Candlestick)")
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], 
+        low=df['Low'], close=df['Close'],
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+    )])
+    fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,b=0,t=0))
+    st.plotly_chart(fig, use_container_width=True)
 
-    with st.expander("💰 Budget 2026 Net Profit (After Tax)"):
+    # ROW 5: TAX TOOL
+    with st.expander("💰 Budget 2026 Tax Predictor"):
         years = st.slider("Hold Duration (Years)", 1, 10, 3)
-        # Budget 2026: 12.5% LTCG for Gold
-        tax = (current_value * (1.12)**years - current_value) * (0.125 if years >= 2 else 0.20)
-        st.write(f"Calculated tax in {years} years: **₹{tax:,.2f}**")
+        tax = (current_total_value * (1.12)**years - current_total_value) * (0.125 if years >= 2 else 0.20)
+        st.write(f"Estimated tax on 12% growth in {years} years: **₹{tax:,.2f}**")
 else:
-    st.error("Connecting to global bullion servers... Please wait.")
+    st.error("Connecting to global market servers... Please refresh.")
