@@ -7,13 +7,13 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import time
 
-# --- 1. CONFIG & STABLE ENGINE ---
+# --- 1. CORE CONFIG ---
 st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
 @st.cache_data(ttl=600)
 def get_live_data(ticker):
     try:
-        # Download is more stable for Streamlit Cloud than .history()
+        # Using yf.download for high-speed mobile stability
         data = yf.download(ticker, period="1mo", interval="1h", progress=False)
         return data if not data.empty else None
     except: return None
@@ -21,81 +21,90 @@ def get_live_data(ticker):
 @st.cache_data(ttl=3600)
 def get_usd_inr():
     try:
+        # Fetches live USD/INR exchange rate (~91.50 range for Feb 2026)
         return requests.get("https://api.exchangerate-api.com/v4/latest/USD").json()["rates"]["INR"]
     except: return 91.52 
 
 rate = get_usd_inr()
 
-# --- 2. SURVIVAL LOGIC (No Errors) ---
-def analyze_survival(ticker, data):
-    if data is None or data.empty: return "WAIT", "Neutral", "Connecting...", 0
-    
-    # Fix for FutureWarning: Using .iloc[0] and .item() for clean floats
-    cp = float(data['Close'].iloc[-1].item())
-    low_5d = float(data['Low'].tail(120).min().item())
-    
-    price_inr = ((cp * rate) / 31.1035) * 1.07 if "=" in ticker else cp
-    intel = "Bullish 📈" if TextBlob(f"Market {ticker}").sentiment.polarity >= 0 else "Bearish 📉"
-    
-    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "Support broken. Exit."
-    elif cp > (low_5d * 1.04): signal, msg = "🟢 BUY", "Recovery confirmed."
-    else: signal, msg = "🟡 WAIT", "Market sideways."
-    
-    return signal, intel, msg, price_inr
-
-# --- 3. DASHBOARD UI ---
-st.title("🛡️ Survival Trader Pro")
-if st.button("🔄 Refresh Market Data"): 
-    st.cache_data.clear()
-    st.rerun()
-
-asset = st.sidebar.text_input("Ticker (GC=F)", "GC=F")
-df = get_live_data(asset)
-signal, intel, reason, live_price = analyze_survival(asset, df)
-
-# Top Metrics
-c1, c2, c3 = st.columns(3)
-with c1: 
-    if "BUY" in signal: st.success(f"### {signal}")
-    elif "SELL" in signal: st.error(f"### {signal}")
-    else: st.warning(f"### {signal}")
-with c2: st.info(f"### Intel: {intel}")
-with c3: st.metric("Live 1g Price", f"₹{live_price:,.2f}")
-
-# --- 4. PORTFOLIO & PREDICTION FIX ---
-st.divider()
-p1, p2 = st.columns(2)
-with p1:
-    st.subheader("📊 Live Investment Tracker")
-    my_inv = st.number_input("Amount Invested (₹)", value=700)
+# --- 2. SIDEBAR (CONTROLS) ---
+with st.sidebar:
+    st.header("👤 Portfolio Settings")
+    # Investment inputs are now safely tucked away here
+    my_inv = st.number_input("Investment Amount (₹)", value=700.0)
     my_buy = st.number_input("My Buy Price (1g)", value=15516.0)
-    current_val = (my_inv / my_buy) * live_price
-    pnl = current_val - my_inv
-    st.metric("Live P&L", f"₹{pnl:,.2f}", delta=f"{(pnl/my_inv)*100:.2f}%")
+    st.divider()
+    asset = st.text_input("Ticker Symbol", "GC=F")
+    if st.button("🔄 Refresh Market Data"):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption("Side-toggle controls keep your main dashboard clean.")
+
+# --- 3. SURVIVAL ENGINE ---
+df = get_live_data(asset)
+if df is not None:
+    # Clean float conversion to prevent TypeErrors
+    cp = float(df['Close'].iloc[-1].item())
+    low_5d = float(df['Low'].tail(120).min().item())
+    
+    # 1g Price: USD Price * Exchange Rate / Troy Oz Grams * 10% Premium (GST+Storage)
+    live_price = ((cp * rate) / 31.1035) * 1.10
+    
+    # Dynamic Signal Logic
+    if cp <= (low_5d * 1.01): signal, msg, col = "🔴 SELL", "DANGER: Support floor broken. Exit now!", "error"
+    elif cp > (low_5d * 1.04): signal, msg, col = "🟢 BUY", "MOMENTUM: Technical recovery is confirmed.", "success"
+    else: signal, msg, col = "🟡 WAIT", "STABLE: Market is sideways. Stay patient.", "warning"
+
+    # Portfolio Real-Time Math
+    current_value = (my_inv / my_buy) * live_price
+    pnl = current_value - my_inv
+    pnl_pct = (pnl / my_inv) * 100
+
+    # --- 4. MAIN DASHBOARD ---
+    st.title("🛡️ Survival Trader Pro")
+    
+    # Row 1: Signals
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        if col == "success": st.success(f"## {signal}")
+        elif col == "error": st.error(f"## {signal}")
+        else: st.warning(f"## {signal}")
+        st.write(f"**Survival Plan:** {msg}")
+    with c2:
+        st.metric("Live 1g Gold Price", f"₹{live_price:,.2f}")
+
+    # Row 2: Results Only
+    st.divider()
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("My Live Profit/Loss", f"₹{pnl:,.2f}", delta=f"{pnl_pct:.2f}%")
+    with m2:
+        st.metric("Total Portfolio Value", f"₹{current_value:,.2f}")
     if pnl > 0: st.balloons()
 
-with p2:
-    st.subheader("🔮 7-Day Forecast")
-    if df is not None:
+    # SECTION 5: ADVANCED FEATURES (COLLAPSIBLE)
+    st.divider()
+    with st.expander("🔮 7-Day Prediction & Market Intel"):
+        # Machine Learning: Linear Regression
         df_p = df.copy()
         df_p['Day'] = np.arange(len(df_p))
         model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
-        
-        # FIX: Added .item() to p_price to fix TypeError: unsupported format string
         pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0].item()
-        p_price = ((pred_usd * rate) / 31.1035) * 1.07
-        p_ret = ((p_price - live_price) / live_price) * 100
+        p_price = ((pred_usd * rate) / 31.1035) * 1.10
+        expected_total = (current_value / live_price) * p_price
         
-        st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}%")
-    else:
-        st.write("Calculating Forecast...")
+        st.metric("Expected Total (7 Days)", f"₹{expected_total:,.2f}", delta=f"₹{(expected_total-current_value):,.2f}")
+        st.write(f"**Global Sentiment:** {'Bullish 📈' if p_price > live_price else 'Bearish 📉'}")
 
-# --- 5. CHART & TAX ---
-if df is not None:
-    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-    fig.update_layout(template="plotly_dark", height=400)
-    st.plotly_chart(fig, use_container_width=True)
+    with st.expander("📉 Full Candlestick Market Trend"):
+        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+        fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,b=0,t=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-years = st.slider("Hold Duration (Years)", 1, 10, 3)
-tax = (my_inv * (1.12)**years - my_inv) * (0.125 if years >= 2 else 0.20)
-st.caption(f"Budget 2026: Est. Tax on 12% growth: ₹{tax:,.2f}")
+    with st.expander("💰 Budget 2026 Net Profit (After Tax)"):
+        years = st.slider("Hold Duration (Years)", 1, 10, 3)
+        # Budget 2026: 12.5% LTCG for Gold
+        tax = (current_value * (1.12)**years - current_value) * (0.125 if years >= 2 else 0.20)
+        st.write(f"Calculated tax in {years} years: **₹{tax:,.2f}**")
+else:
+    st.error("Connecting to global bullion servers... Please wait.")
