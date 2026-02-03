@@ -7,19 +7,16 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import time
 
-# --- 1. ERROR-PROOF ENGINE ---
+# --- 1. CONFIG & STABLE ENGINE ---
 st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
-@st.cache_data(ttl=600) # Increased cache to 10 mins to avoid RateLimit
+@st.cache_data(ttl=600)
 def get_live_data(ticker):
-    for attempt in range(3): # Try up to 3 times with a delay
-        try:
-            data = yf.download(ticker, period="1mo", interval="1h", progress=False)
-            if not data.empty:
-                return data
-        except Exception:
-            time.sleep(2) # Wait 2 seconds before retrying
-    return None
+    try:
+        # download is more stable for Streamlit Cloud
+        data = yf.download(ticker, period="1mo", interval="1h", progress=False)
+        return data if not data.empty else None
+    except: return None
 
 @st.cache_data(ttl=3600)
 def get_usd_inr():
@@ -29,24 +26,26 @@ def get_usd_inr():
 
 rate = get_usd_inr()
 
-# --- 2. SURVIVAL & 1g PRICING ---
+# --- 2. SURVIVAL LOGIC (Future-Proofed) ---
 def analyze_survival(ticker, data):
     if data is None or data.empty: return "WAIT", "Neutral", "Connecting...", 0
-    cp = float(data['Close'].iloc[-1])
-    low_5d = float(data['Low'].tail(120).min())
+    
+    # Fix for FutureWarning: using .item() to get clean float values
+    cp = float(data['Close'].iloc[-1].item())
+    low_5d = float(data['Low'].tail(120).min().item())
     
     price_inr = ((cp * rate) / 31.1035) * 1.07 if "=" in ticker else cp
     intel = "Bullish 📈" if TextBlob(f"Market {ticker}").sentiment.polarity >= 0 else "Bearish 📉"
     
-    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "DANGER: Exit to protect cash."
-    elif cp > (low_5d * 1.04): signal, msg = "🟢 BUY", "MOMENTUM: Recovery confirmed."
-    else: signal, msg = "🟡 WAIT", "STABLE: Market sideways."
+    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "Support broken."
+    elif cp > (low_5d * 1.04): signal, msg = "🟢 BUY", "Recovery confirmed."
+    else: signal, msg = "🟡 WAIT", "Market sideways."
     
     return signal, intel, msg, price_inr
 
 # --- 3. DASHBOARD UI ---
 st.title("🛡️ Survival Trader Pro")
-if st.button("🔄 Force Refresh (Use Sparingly)"): 
+if st.button("🔄 Refresh Market Data"): 
     st.cache_data.clear()
     st.rerun()
 
@@ -63,12 +62,12 @@ with c1:
 with c2: st.info(f"### Intel: {intel}")
 with c3: st.metric("Live 1g Price", f"₹{live_price:,.2f}")
 
-# --- 4. PORTFOLIO & FORECAST ---
+# --- 4. PORTFOLIO & FIXED PREDICTION ---
 st.divider()
 p1, p2 = st.columns(2)
 with p1:
     st.subheader("📊 My Live Investment")
-    my_inv = st.number_input("Amount Invested (₹)", value=700)
+    my_inv = st.number_input("Amount (₹)", value=700)
     my_buy = st.number_input("My Buy Price (1g)", value=15516.0)
     current_val = (my_inv / my_buy) * live_price
     pnl = current_val - my_inv
@@ -81,15 +80,18 @@ with p2:
         df_p = df.copy()
         df_p['Day'] = np.arange(len(df_p))
         model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
-        pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0]
+        
+        # FIX: Added .item() to resolve TypeError
+        pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0].item()
         p_price = ((pred_usd * rate) / 31.1035) * 1.07
         p_ret = ((p_price - live_price) / live_price) * 100
-        st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}% Expected")
+        
+        st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}%")
+    else:
+        st.write("Fetching data for prediction...")
 
 # --- 5. CHART ---
 if df is not None:
     fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=10))
+    fig.update_layout(template="plotly_dark", height=400)
     st.plotly_chart(fig, use_container_width=True)
-
-st.caption(f"Survival Alert: {reason}")
