@@ -7,64 +7,54 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import time
 
-# --- 1. CORE ENGINE ---
+# --- 1. ERROR-PROOF ENGINE ---
 st.set_page_config(page_title="Survival Trader Pro", page_icon="🛡️", layout="wide")
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600) # Increased cache to 10 mins to avoid RateLimit
 def get_live_data(ticker):
-    try:
-        time.sleep(1) 
-        return yf.Ticker(ticker).history(period="1mo", interval="1h")
-    except: return None
+    for attempt in range(3): # Try up to 3 times with a delay
+        try:
+            data = yf.download(ticker, period="1mo", interval="1h", progress=False)
+            if not data.empty:
+                return data
+        except Exception:
+            time.sleep(2) # Wait 2 seconds before retrying
+    return None
 
 @st.cache_data(ttl=3600)
 def get_usd_inr():
     try:
-        # Live Navi Mumbai exchange rate
         return requests.get("https://api.exchangerate-api.com/v4/latest/USD").json()["rates"]["INR"]
     except: return 91.52 
 
 rate = get_usd_inr()
 
-# --- 2. SURVIVAL & 1g PRICING LOGIC ---
+# --- 2. SURVIVAL & 1g PRICING ---
 def analyze_survival(ticker, data):
-    if data is None or data.empty: return "WAIT", "Neutral", "No Data", 0
-    cp = data['Close'].iloc[-1]
-    low_5d = data['Low'].tail(120).min()
+    if data is None or data.empty: return "WAIT", "Neutral", "Connecting...", 0
+    cp = float(data['Close'].iloc[-1])
+    low_5d = float(data['Low'].tail(120).min())
     
-    # Accurate 1g Gold Price (with 7% local premium)
     price_inr = ((cp * rate) / 31.1035) * 1.07 if "=" in ticker else cp
+    intel = "Bullish 📈" if TextBlob(f"Market {ticker}").sentiment.polarity >= 0 else "Bearish 📉"
     
-    # Intel & Signal Logic
-    intel_txt = f"Market for {ticker} shows movement."
-    intel = "Bullish 📈" if TextBlob(intel_txt).sentiment.polarity >= 0 else "Bearish 📉"
-    
-    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "DANGER: Floor broken. Protect cash."
+    if cp <= (low_5d * 1.01): signal, msg = "🔴 SELL", "DANGER: Exit to protect cash."
     elif cp > (low_5d * 1.04): signal, msg = "🟢 BUY", "MOMENTUM: Recovery confirmed."
     else: signal, msg = "🟡 WAIT", "STABLE: Market sideways."
     
     return signal, intel, msg, price_inr
 
-# --- 3. 7-DAY FORECAST ---
-def get_prediction(data):
-    if data is None or len(data) < 20: return 0, 0
-    df_p = data.copy()
-    df_p['Day'] = np.arange(len(df_p))
-    model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
-    pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0]
-    pred_inr = ((pred_usd * rate) / 31.1035) * 1.07
-    curr_inr = ((data['Close'].iloc[-1] * rate) / 31.1035) * 1.07
-    return pred_inr, ((pred_inr - curr_inr) / curr_inr) * 100
-
-# --- 4. DASHBOARD UI ---
+# --- 3. DASHBOARD UI ---
 st.title("🛡️ Survival Trader Pro")
-if st.button("🔄 Refresh All Real-Time Data"): st.cache_data.clear()
+if st.button("🔄 Force Refresh (Use Sparingly)"): 
+    st.cache_data.clear()
+    st.rerun()
 
 asset = st.sidebar.text_input("Ticker (GC=F)", "GC=F")
 df = get_live_data(asset)
 signal, intel, reason, live_price = analyze_survival(asset, df)
 
-# Top Metrics
+# Metrics
 c1, c2, c3 = st.columns(3)
 with c1: 
     if "BUY" in signal: st.success(f"### {signal}")
@@ -73,7 +63,7 @@ with c1:
 with c2: st.info(f"### Intel: {intel}")
 with c3: st.metric("Live 1g Price", f"₹{live_price:,.2f}")
 
-# --- 5. LIVE PORTFOLIO & FORECAST ---
+# --- 4. PORTFOLIO & FORECAST ---
 st.divider()
 p1, p2 = st.columns(2)
 with p1:
@@ -87,16 +77,19 @@ with p1:
 
 with p2:
     st.subheader("🔮 7-Day Forecast")
-    p_price, p_ret = get_prediction(df)
-    st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}% Expected")
+    if df is not None:
+        df_p = df.copy()
+        df_p['Day'] = np.arange(len(df_p))
+        model = LinearRegression().fit(df_p[['Day']], df_p['Close'])
+        pred_usd = model.predict(np.array([[len(df_p) + 7]]))[0]
+        p_price = ((pred_usd * rate) / 31.1035) * 1.07
+        p_ret = ((p_price - live_price) / live_price) * 100
+        st.metric("Predicted 1g (7D)", f"₹{p_price:,.2f}", delta=f"{p_ret:.2f}% Expected")
 
-# --- 6. CHART & BUDGET 2026 TAX ---
+# --- 5. CHART ---
 if df is not None:
     fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-    fig.update_layout(template="plotly_dark", height=400)
+    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=10))
     st.plotly_chart(fig, use_container_width=True)
 
-st.write(f"**Survival Alert:** {reason}")
-years = st.slider("Hold Duration (Years)", 1, 10, 3)
-tax = (my_inv * (1.12)**years - my_inv) * (0.125 if years >= 2 else 0.20)
-st.caption(f"Budget 2026: Estimated Tax on 12% Growth: ₹{tax:,.2f}")
+st.caption(f"Survival Alert: {reason}")
